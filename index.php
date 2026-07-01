@@ -54,13 +54,11 @@ if (isset($_FILES['bot_file']) && $_SERVER['REQUEST_METHOD'] === 'POST') {
     } elseif ($file['error'] !== UPLOAD_ERR_OK) {
         set_alert("File upload failed with error code: " . $file['error']);
     } else {
-        // কোনো প্রকার সিকিউরিটি ফিল্টার বা টোকেন রিকোয়ারমেন্ট ছাড়া সরাসরি আপলোড
         $botId = "bot_" . uniqid();
         $botDir = BOTS_DIR . $botId;
         @mkdir($botDir, 0755, true);
         
         if (move_uploaded_file($file['tmp_name'], $botDir . "/bot.php")) {
-            // স্ট্যাটাস তৈরি
             file_put_contents($botDir . "/status.json", json_encode(['status' => 'stopped']));
             set_alert("File successfully deployed!", "success");
         } else {
@@ -77,7 +75,6 @@ if (isset($_POST['save_code'])) {
     $botDir = BOTS_DIR . $botId . "/";
     
     if (is_dir($botDir)) {
-        // কোনো রেস্ট্রিকশন ছাড়াই কোড সরাসরি সেভ করা হচ্ছে
         file_put_contents($botDir . "bot.php", $code);
         set_alert("Source code updated successfully!", "success");
     }
@@ -98,40 +95,58 @@ if (isset($_GET['action']) && isset($_GET['bot_id'])) {
         
         if ($action === 'start') {
             if ($token) {
-                // Gateway URL জেনারেট করা
-                $protocol = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off') ? "https" : "http";
+                // Gateway URL জেনারেট করা (HTTPS ফিক্স করা হয়েছে)
                 $host = $_SERVER['HTTP_HOST'];
                 $scriptPath = dirname($_SERVER['SCRIPT_NAME']);
                 $scriptPath = ($scriptPath === '/' || $scriptPath === '\\') ? '' : $scriptPath;
-                $webhookUrl = "$protocol://$host" . $scriptPath . "/gateway.php?id=" . $botId;
                 
-                // টেলিগ্রাম এপিআই কল
+                // Render-এর জন্য সব সময় https ফিক্স করে দেওয়া হলো
+                $webhookUrl = "https://$host" . $scriptPath . "/gateway.php?id=" . $botId;
+                
+                // টেলিগ্রাম এপিআই কল (cURL ব্যবহার করে)
                 $apiUrl = "https://api.telegram.org/bot$token/setWebhook?url=" . urlencode($webhookUrl);
-                $response = @file_get_contents($apiUrl);
-                $resData = json_decode($response, true);
                 
-                if ($resData && $resData['ok']) {
-                    file_put_contents($statusFile, json_encode(['status' => 'running', 'token' => $token, 'updated' => date('Y-m-d H:i:s')]));
-                    set_alert("Bot Online! Webhook linked successfully.", "success");
+                $ch = curl_init();
+                curl_setopt($ch, CURLOPT_URL, $apiUrl);
+                curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+                $response = curl_exec($ch);
+                
+                if ($response === false) {
+                    $desc = curl_error($ch);
+                    set_alert("cURL Error: " . $desc);
                 } else {
-                    $desc = $resData['description'] ?? 'API issue';
-                    set_alert("Telegram Webhook Registration Failed: " . $desc);
+                    $resData = json_decode($response, true);
+                    
+                    if ($resData && isset($resData['ok']) && $resData['ok']) {
+                        file_put_contents($statusFile, json_encode(['status' => 'running', 'token' => $token, 'updated' => date('Y-m-d H:i:s')]));
+                        set_alert("Bot Online! Webhook linked successfully.", "success");
+                    } else {
+                        // যদি JSON পার্স না হয় বা অন্য কোনো সমস্যা থাকে, তাহলে রিয়েল এরর মেসেজ দেখাবে
+                        $desc = $resData['description'] ?? 'API Response: ' . htmlspecialchars(substr($response, 0, 100));
+                        set_alert("Telegram Webhook Failed: " . $desc);
+                    }
                 }
+                curl_close($ch);
+                
             } else {
                 set_alert("Auto-start failed: No Telegram Bot Token detected in your bot.php file.");
             }
         } elseif ($action === 'stop') {
             if ($token) {
-                // ডিলিট ওয়েব হুক
                 $apiUrl = "https://api.telegram.org/bot$token/deleteWebhook";
-                @file_get_contents($apiUrl);
+                $ch = curl_init();
+                curl_setopt($ch, CURLOPT_URL, $apiUrl);
+                curl_setopt($ch, CURLOPT_RETURNTRANSFER, 1);
+                curl_setopt($ch, CURLOPT_SSL_VERIFYPEER, false);
+                curl_exec($ch);
+                curl_close($ch);
             }
             file_put_contents($statusFile, json_encode(['status' => 'stopped']));
             set_alert("Bot stopped successfully.", "success");
         }
         
         if ($action === 'delete') {
-            // ফাইল মুছে ফেলা
             array_map('unlink', glob("$botDir*.*"));
             @rmdir($botDir);
             set_alert("Bot instance successfully deleted.", "success");
@@ -140,7 +155,6 @@ if (isset($_GET['action']) && isset($_GET['bot_id'])) {
     header("Location: index.php"); exit;
 }
 
-// সমস্ত বটের লিস্ট লোড করা
 $myBots = is_dir(BOTS_DIR) ? array_filter(glob(BOTS_DIR . '*'), 'is_dir') : [];
 ?>
 <!DOCTYPE html>
@@ -162,279 +176,42 @@ $myBots = is_dir(BOTS_DIR) ? array_filter(glob(BOTS_DIR . '*'), 'is_dir') : [];
             --danger-red: #ff3b30;
             --success-green: #34c759;
         }
-
-        body {
-            font-family: 'Segoe UI', Roboto, sans-serif;
-            background-color: var(--bg-primary);
-            color: var(--text-main);
-            margin: 0;
-            padding: 0;
-            display: flex;
-            flex-direction: column;
-            min-height: 100vh;
-        }
-
-        /* হেডার */
-        .header {
-            background-color: var(--bg-secondary);
-            border-bottom: 2px solid var(--accent-yellow);
-            padding: 15px 25px;
-            display: flex;
-            justify-content: center;
-            align-items: center;
-        }
-
-        .logo {
-            font-size: 24px;
-            font-weight: 900;
-            color: var(--accent-yellow);
-            text-decoration: none;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-
-        /* কন্টেইনার */
-        .container {
-            max-width: 600px;
-            width: 90%;
-            margin: 30px auto;
-            flex-grow: 1;
-        }
-
-        /* কার্ড থিম */
-        .card {
-            background-color: var(--bg-secondary);
-            border: 1px solid var(--border-color);
-            border-radius: 16px;
-            padding: 25px;
-            box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5);
-            margin-bottom: 25px;
-        }
-
-        .card-title {
-            font-size: 20px;
-            font-weight: bold;
-            color: var(--accent-yellow);
-            margin-top: 0;
-            margin-bottom: 15px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-        }
-
-        /* বাটন */
-        .btn-submit {
-            background-color: var(--accent-yellow);
-            color: var(--bg-primary);
-            border: none;
-            width: 100%;
-            padding: 14px;
-            border-radius: 10px;
-            font-size: 16px;
-            font-weight: bold;
-            cursor: pointer;
-            transition: 0.2s ease;
-        }
-
-        .btn-submit:hover {
-            background-color: var(--accent-hover);
-        }
-
-        .btn-logout {
-            background-color: transparent;
-            color: var(--accent-yellow);
-            border: 1px solid var(--accent-yellow);
-            padding: 8px 16px;
-            border-radius: 8px;
-            font-weight: bold;
-            cursor: pointer;
-            text-decoration: none;
-            transition: 0.2s ease;
-        }
-
-        .btn-logout:hover {
-            background-color: var(--accent-yellow);
-            color: var(--bg-primary);
-        }
-
-        /* এরর এবং নোটিফিকেশন মেসেজ */
-        .alert {
-            border-radius: 12px;
-            padding: 15px;
-            margin-bottom: 20px;
-            font-weight: 500;
-            font-size: 14px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            border-left: 5px solid;
-            text-align: left;
-        }
-
-        .alert-error {
-            background-color: rgba(255, 59, 48, 0.1);
-            color: var(--danger-red);
-            border-color: var(--danger-red);
-        }
-
-        .alert-success {
-            background-color: rgba(52, 199, 89, 0.1);
-            color: var(--success-green);
-            border-color: var(--success-green);
-        }
-
-        /* বট কারুকার্য এবং ইন্টারেক্টিভ কন্টেন্ট */
-        .bot-item {
-            background-color: var(--bg-secondary);
-            border: 1px solid var(--border-color);
-            border-radius: 12px;
-            margin-bottom: 15px;
-            overflow: hidden;
-            transition: 0.3s ease;
-        }
-
-        .bot-header {
-            padding: 15px 20px;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            cursor: pointer;
-            user-select: none;
-        }
-
-        .bot-header:hover {
-            background-color: rgba(255, 204, 0, 0.05);
-        }
-
-        .bot-title {
-            font-weight: bold;
-            font-size: 16px;
-            display: flex;
-            align-items: center;
-            gap: 12px;
-        }
-
-        .status-badge {
-            font-size: 10px;
-            padding: 3px 8px;
-            border-radius: 50px;
-            text-transform: uppercase;
-            font-weight: 900;
-        }
-
+        body { font-family: 'Segoe UI', Roboto, sans-serif; background-color: var(--bg-primary); color: var(--text-main); margin: 0; padding: 0; display: flex; flex-direction: column; min-height: 100vh; }
+        .header { background-color: var(--bg-secondary); border-bottom: 2px solid var(--accent-yellow); padding: 15px 25px; display: flex; justify-content: center; align-items: center; }
+        .logo { font-size: 24px; font-weight: 900; color: var(--accent-yellow); text-decoration: none; display: flex; align-items: center; gap: 10px; }
+        .container { max-width: 600px; width: 90%; margin: 30px auto; flex-grow: 1; }
+        .card { background-color: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 16px; padding: 25px; box-shadow: 0 10px 25px rgba(0, 0, 0, 0.5); margin-bottom: 25px; }
+        .card-title { font-size: 20px; font-weight: bold; color: var(--accent-yellow); margin-top: 0; margin-bottom: 15px; display: flex; align-items: center; gap: 10px; }
+        .btn-submit { background-color: var(--accent-yellow); color: var(--bg-primary); border: none; width: 100%; padding: 14px; border-radius: 10px; font-size: 16px; font-weight: bold; cursor: pointer; transition: 0.2s ease; }
+        .btn-submit:hover { background-color: var(--accent-hover); }
+        .btn-logout { background-color: transparent; color: var(--accent-yellow); border: 1px solid var(--accent-yellow); padding: 8px 16px; border-radius: 8px; font-weight: bold; cursor: pointer; text-decoration: none; transition: 0.2s ease; }
+        .btn-logout:hover { background-color: var(--accent-yellow); color: var(--bg-primary); }
+        .alert { border-radius: 12px; padding: 15px; margin-bottom: 20px; font-weight: 500; font-size: 14px; display: flex; align-items: center; gap: 10px; border-left: 5px solid; text-align: left; }
+        .alert-error { background-color: rgba(255, 59, 48, 0.1); color: var(--danger-red); border-color: var(--danger-red); }
+        .alert-success { background-color: rgba(52, 199, 89, 0.1); color: var(--success-green); border-color: var(--success-green); }
+        .bot-item { background-color: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 12px; margin-bottom: 15px; overflow: hidden; transition: 0.3s ease; }
+        .bot-header { padding: 15px 20px; display: flex; justify-content: space-between; align-items: center; cursor: pointer; user-select: none; }
+        .bot-header:hover { background-color: rgba(255, 204, 0, 0.05); }
+        .bot-title { font-weight: bold; font-size: 16px; display: flex; align-items: center; gap: 12px; }
+        .status-badge { font-size: 10px; padding: 3px 8px; border-radius: 50px; text-transform: uppercase; font-weight: 900; }
         .status-running { background-color: var(--success-green); color: black; }
         .status-stopped { background-color: var(--text-muted); color: black; }
-
-        /* বট বিস্তারিত প্যানেল */
-        .bot-details {
-            display: none;
-            background-color: #0d0d11;
-            padding: 20px;
-            border-top: 1px solid var(--border-color);
-        }
-
-        /* একশন বাটনস গ্রিড */
-        .action-grid {
-            display: grid;
-            grid-template-columns: repeat(2, 1fr);
-            gap: 10px;
-            margin-bottom: 15px;
-        }
-
-        .btn-act {
-            padding: 10px;
-            border-radius: 8px;
-            border: none;
-            font-weight: bold;
-            font-size: 12px;
-            cursor: pointer;
-            text-align: center;
-            text-decoration: none;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            gap: 6px;
-            transition: 0.2s;
-        }
-
+        .bot-details { display: none; background-color: #0d0d11; padding: 20px; border-top: 1px solid var(--border-color); }
+        .action-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 10px; margin-bottom: 15px; }
+        .btn-act { padding: 10px; border-radius: 8px; border: none; font-weight: bold; font-size: 12px; cursor: pointer; text-align: center; text-decoration: none; display: flex; align-items: center; justify-content: center; gap: 6px; transition: 0.2s; }
         .btn-start { background-color: var(--success-green); color: black; }
         .btn-stop { background-color: #ff9500; color: black; }
         .btn-log { background-color: var(--accent-yellow); color: black; }
         .btn-edit { background-color: #007aff; color: white; }
         .btn-del { background-color: var(--danger-red); color: white; grid-column: span 2; }
-
         .btn-act:hover { opacity: 0.85; }
-
-        /* ফাইল আপলোড জোন */
-        .upload-zone {
-            border: 2px dashed var(--accent-yellow);
-            border-radius: 12px;
-            padding: 30px 15px;
-            text-align: center;
-            cursor: pointer;
-            background-color: rgba(255, 204, 0, 0.02);
-            transition: 0.3s;
-        }
-
-        .upload-zone:hover {
-            background-color: rgba(255, 204, 0, 0.06);
-        }
-
-        .upload-zone i {
-            font-size: 36px;
-            color: var(--accent-yellow);
-            margin-bottom: 10px;
-        }
-
-        /* কাস্টম কোড এডিটর স্ক্রিন */
-        .editor-overlay {
-            position: fixed;
-            top: 0; left: 0;
-            width: 100vw; height: 100vh;
-            background-color: var(--bg-primary);
-            z-index: 9999;
-            display: none;
-            flex-direction: column;
-        }
-
-        .editor-header {
-            background-color: var(--bg-secondary);
-            padding: 15px 20px;
-            border-bottom: 1px solid var(--accent-yellow);
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-        }
-
-        .editor-textarea {
-            width: 100%;
-            flex-grow: 1;
-            background-color: #070709;
-            color: #4af626; /* ম্যাট্রিক্স গ্রিন কালার */
-            font-family: 'Courier New', monospace;
-            font-size: 15px;
-            padding: 20px;
-            border: none;
-            outline: none;
-            resize: none;
-            box-sizing: border-box;
-        }
-
-        /* টার্মিনাল লগ ভিউ */
-        .terminal-box {
-            background-color: black;
-            color: var(--accent-yellow);
-            font-family: monospace;
-            padding: 15px;
-            border-radius: 8px;
-            border: 1px solid var(--border-color);
-            max-height: 200px;
-            overflow-y: auto;
-            text-align: left;
-            white-space: pre-wrap;
-            font-size: 12px;
-        }
+        .upload-zone { border: 2px dashed var(--accent-yellow); border-radius: 12px; padding: 30px 15px; text-align: center; cursor: pointer; background-color: rgba(255, 204, 0, 0.02); transition: 0.3s; }
+        .upload-zone:hover { background-color: rgba(255, 204, 0, 0.06); }
+        .upload-zone i { font-size: 36px; color: var(--accent-yellow); margin-bottom: 10px; }
+        .editor-overlay { position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; background-color: var(--bg-primary); z-index: 9999; display: none; flex-direction: column; }
+        .editor-header { background-color: var(--bg-secondary); padding: 15px 20px; border-bottom: 1px solid var(--accent-yellow); display: flex; justify-content: space-between; align-items: center; }
+        .editor-textarea { width: 100%; flex-grow: 1; background-color: #000000; color: #ffffff; font-family: 'Courier New', monospace; font-size: 15px; padding: 20px; border: none; outline: none; resize: none; box-sizing: border-box; }
+        .terminal-box { background-color: black; color: var(--accent-yellow); font-family: monospace; padding: 15px; border-radius: 8px; border: 1px solid var(--border-color); max-height: 200px; overflow-y: auto; text-align: left; white-space: pre-wrap; font-size: 12px; }
     </style>
 </head>
 <body>
@@ -445,7 +222,6 @@ $myBots = is_dir(BOTS_DIR) ? array_filter(glob(BOTS_DIR . '*'), 'is_dir') : [];
 
     <div class="container">
         
-        <!-- সিসটেম এরর ট্র্যাকিং মেসেজ (বিন্দু পরিমাণ বাগ সহজেই দেখার জন্য) -->
         <?php if ($system_error): ?>
             <div class="alert alert-error">
                 <i class="fas fa-exclamation-triangle"></i>
@@ -456,7 +232,6 @@ $myBots = is_dir(BOTS_DIR) ? array_filter(glob(BOTS_DIR . '*'), 'is_dir') : [];
             </div>
         <?php endif; ?>
 
-        <!-- অ্যালার্টস -->
         <?php if ($alert): ?>
             <div class="alert <?= $alert['type'] === 'success' ? 'alert-success' : 'alert-error'; ?>">
                 <i class="fas <?= $alert['type'] === 'success' ? 'fa-check-circle' : 'fa-exclamation-circle'; ?>"></i>
@@ -464,7 +239,6 @@ $myBots = is_dir(BOTS_DIR) ? array_filter(glob(BOTS_DIR . '*'), 'is_dir') : [];
             </div>
         <?php endif; ?>
 
-        <!-- ড্যাশবোর্ড স্ক্রিন (সরাসরি অ্যাক্সেস) -->
         <div class="card">
             <div class="card-title"><i class="fas fa-terminal"></i> BOT DEPLOYMENT</div>
             <form method="POST" enctype="multipart/form-data">
@@ -522,13 +296,12 @@ $myBots = is_dir(BOTS_DIR) ? array_filter(glob(BOTS_DIR . '*'), 'is_dir') : [];
                     <a href="?action=delete&bot_id=<?= $botId; ?>" onclick="return confirm('Confirm complete destruction of this bot?')" class="btn-act btn-del"><i class="fas fa-trash-alt"></i> DESTROY INSTANCE</a>
                 </div>
 
-                <!-- হিডেন লগ এবং কোড ডাম্প -->
                 <div id="hidden_logs_<?= $botId; ?>" style="display:none;"><?= htmlspecialchars($logs); ?></div>
                 <div id="hidden_code_<?= $botId; ?>" style="display:none;"><?= htmlspecialchars($botCode); ?></div>
 
                 <div style="font-size:11px; color:var(--text-muted); text-align:left; margin-top:10px;">
                     <i class="fas fa-link"></i> Webhook Gateway: <br>
-                    <code style="color:white; word-break: break-all;"><?= (empty($_SERVER['HTTPS']) ? 'http' : 'https') . "://" . $_SERVER['HTTP_HOST'] . dirname($_SERVER['SCRIPT_NAME']) . "/gateway.php?id=" . $botId; ?></code>
+                    <code style="color:white; word-break: break-all;">https://<?= $_SERVER['HTTP_HOST'] . dirname($_SERVER['SCRIPT_NAME']) . "/gateway.php?id=" . $botId; ?></code>
                 </div>
             </div>
         </div>
@@ -564,43 +337,30 @@ $myBots = is_dir(BOTS_DIR) ? array_filter(glob(BOTS_DIR . '*'), 'is_dir') : [];
     </div>
 
     <script>
-        // ফাইল সিলেকশন লেবেল আপডেট
         function updateLabel(input) {
             if(input.files[0]) {
                 document.getElementById('upload_lbl').innerHTML = "READY: " + input.files[0].name;
                 document.getElementById('upload_lbl').parentElement.style.borderColor = "var(--success-green)";
             }
         }
-
-        // বট একর্ডিয়ন টগল
         function toggleDetails(botId) {
             let detailPanel = document.getElementById('details_' + botId);
-            if (detailPanel.style.display === 'block') {
-                detailPanel.style.display = 'none';
-            } else {
-                detailPanel.style.display = 'block';
-            }
+            detailPanel.style.display = (detailPanel.style.display === 'block') ? 'none' : 'block';
         }
-
-        // লগ প্রদর্শন
         function viewLogs(botId) {
             let logs = document.getElementById('hidden_logs_' + botId).innerHTML;
             document.getElementById('modalLogContent').textContent = logs;
             document.getElementById('logModal').style.display = 'flex';
         }
-
         function closeLogModal() {
             document.getElementById('logModal').style.display = 'none';
         }
-
-        // ওয়েব এডিটর অ্যাকশনস
         function openEditor(botId) {
             let code = document.getElementById('hidden_code_' + botId).textContent;
             document.getElementById('editor_textarea').value = code;
             document.getElementById('editor_bot_id').value = botId;
             document.getElementById('editorContainer').style.display = 'flex';
         }
-
         function closeEditor() {
             document.getElementById('editorContainer').style.display = 'none';
         }
